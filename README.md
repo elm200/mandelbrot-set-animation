@@ -2,7 +2,9 @@
 
 WebGL(フラグメントシェーダ)でマンデルブロ集合をリアルタイム計算・描画する、自動ズームアニメーションの単一HTMLアプリ。
 
-![screenshot](docs/screenshot.png)
+**デモ**: https://mandelbrot-set-animation.vercel.app
+
+<img src="docs/screenshot.png" alt="Mandelbrot Set Animation スクリーンショット" width="480">
 
 ## 主な機能
 
