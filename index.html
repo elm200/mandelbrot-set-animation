@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mandelbrot Set Animation</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #glcanvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #ui {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    color: #fff;
+    background: rgba(0,0,0,0.45);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    backdrop-filter: blur(4px);
+    user-select: none;
+    pointer-events: none;
+  }
+  #ui b { color: #7cf; }
+  #controls {
+    position: fixed;
+    bottom: 12px;
+    left: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  #speedControl {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(0,0,0,0.45);
+    padding: 6px 14px;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 13px;
+    backdrop-filter: blur(4px);
+  }
+  #speedControl input[type="range"] {
+    width: 140px;
+    accent-color: #7cf;
+  }
+  #speedValue {
+    min-width: 3.2em;
+    text-align: right;
+    color: #7cf;
+    font-variant-numeric: tabular-nums;
+  }
+  button {
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: #fff;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+  }
+  button:hover { background: rgba(255,255,255,0.25); }
+  button.active { background: rgba(120,200,255,0.4); border-color: #7cf; }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="ui">
+  <div><b>Mandelbrot Set</b> — 自動ズームアニメーション</div>
+  <div>クリック: そこを中心に再スタート / ドラッグ: 移動 / ホイール: 手動ズーム</div>
+</div>
+<div id="controls">
+  <button id="btnPlay" class="active">再生 / 一時停止</button>
+  <button id="btnReset">リセット</button>
+  <button id="btnPalette">配色を変更</button>
+  <div id="speedControl">
+    <label for="speedSlider">ズーム速度</label>
+    <input type="range" id="speedSlider" min="0" max="300" value="100" step="1">
+    <span id="speedValue">1.0x</span>
+  </div>
+  <div id="speedControl">
+    <label for="fpsSlider">フレームレート上限</label>
+    <input type="range" id="fpsSlider" min="5" max="60" value="60" step="1">
+    <span id="fpsValue">60fps</span>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+if (!gl) {
+  document.body.innerHTML = '<p style="color:#fff;padding:20px">お使いのブラウザはWebGLに対応していません。</p>';
+  throw new Error('WebGL not supported');
+}
+
+// --- Shaders ---------------------------------------------------------
+const vertexSrc = `
+attribute vec2 a_position;
+void main() {
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+const fragmentSrc = `
+precision highp float;
+
+uniform vec2 u_resolution;
+uniform vec2 u_center;
+uniform float u_scale;
+uniform float u_time;
+uniform int u_palette;
+
+vec3 palette(float t, int mode) {
+  if (mode == 0) {
+    // smooth cosine palette (classic vivid)
+    vec3 a = vec3(0.5, 0.5, 0.5);
+    vec3 b = vec3(0.5, 0.5, 0.5);
+    vec3 c = vec3(1.0, 1.0, 1.0);
+    vec3 d = vec3(0.00, 0.33, 0.67);
+    return a + b * cos(6.28318 * (c * t + d));
+  } else if (mode == 1) {
+    // fire
+    vec3 a = vec3(0.6, 0.4, 0.2);
+    vec3 b = vec3(0.4, 0.4, 0.3);
+    vec3 c = vec3(1.0, 0.7, 0.4);
+    vec3 d = vec3(0.0, 0.15, 0.2);
+    return a + b * cos(6.28318 * (c * t + d));
+  } else {
+    // ice / blue
+    vec3 a = vec3(0.2, 0.3, 0.5);
+    vec3 b = vec3(0.3, 0.4, 0.5);
+    vec3 c = vec3(0.8, 0.9, 1.0);
+    vec3 d = vec3(0.5, 0.6, 0.7);
+    return a + b * cos(6.28318 * (c * t + d));
+  }
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
+  vec2 c = u_center + uv * u_scale;
+
+  vec2 z = vec2(0.0);
+  float iter = 0.0;
+  const float MAX_ITER = 300.0;
+  const float BAILOUT = 256.0;
+
+  for (float i = 0.0; i < MAX_ITER; i += 1.0) {
+    z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
+    if (dot(z, z) > BAILOUT) {
+      iter = i;
+      break;
+    }
+    iter = MAX_ITER;
+  }
+
+  if (iter >= MAX_ITER - 0.5) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+  } else {
+    // smooth iteration count for continuous coloring
+    float logZn = log(dot(z, z)) / 2.0;
+    float nu = log(logZn / log(2.0)) / log(2.0);
+    float smoothIter = iter + 1.0 - nu;
+    float t = fract(smoothIter * 0.02 + u_time * 0.02);
+    vec3 col = palette(t, u_palette);
+    gl_FragColor = vec4(col, 1.0);
+  }
+}
+`;
+
+function compileShader(gl, type, src) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, src);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+const vs = compileShader(gl, gl.VERTEX_SHADER, vertexSrc);
+const fs = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSrc);
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(program));
+}
+gl.useProgram(program);
+
+// Full-screen quad
+const posBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1, -1,  1, -1,  -1, 1,
+  -1, 1,   1, -1,   1, 1
+]), gl.STATIC_DRAW);
+
+const posLoc = gl.getAttribLocation(program, 'a_position');
+gl.enableVertexAttribArray(posLoc);
+gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+const u_resolution = gl.getUniformLocation(program, 'u_resolution');
+const u_center = gl.getUniformLocation(program, 'u_center');
+const u_scale = gl.getUniformLocation(program, 'u_scale');
+const u_time = gl.getUniformLocation(program, 'u_time');
+const u_palette = gl.getUniformLocation(program, 'u_palette');
+
+// --- State -------------------------------------------------------------
+const INITIAL_CENTER = [-0.743643887037151, 0.13182590420533];
+const INITIAL_SCALE = 3.0;
+const MIN_SCALE = 3.0e-6; // re-loop once zoomed in deep enough
+const SPEED_SCALE = 1 / 3; // スライダー "1.0x" が旧デフォルトの1/3速度になるよう調整
+
+let center = [...INITIAL_CENTER];
+let scale = INITIAL_SCALE;
+let playing = true;
+let paletteMode = 0;
+let timeAccum = 0;
+let lastFrame = performance.now();
+let zoomSpeed = 1.0; // 0 = 停止, 1 = 標準速度, 3 = 最速
+let lastDrawTime = performance.now();
+let minFrameInterval = 1000 / 60; // 描画(GPU負荷)そのものを間引く間隔(ms)
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function render(now) {
+  requestAnimationFrame(render);
+
+  const dt = Math.min((now - lastFrame) / 1000, 0.1);
+  lastFrame = now;
+
+  if (playing && zoomSpeed > 0) {
+    // exponential zoom-in; reset once too deep to keep numeric precision
+    scale *= Math.pow(0.985, dt * 60 * zoomSpeed * SPEED_SCALE);
+    timeAccum += dt;
+    if (scale < MIN_SCALE) {
+      scale = INITIAL_SCALE;
+    }
+  }
+
+  // フレームレート上限: 状態更新は毎回行うが、実際のGPU描画はここで間引く
+  if (now - lastDrawTime < minFrameInterval) return;
+  lastDrawTime = now;
+
+  gl.uniform2f(u_resolution, canvas.width, canvas.height);
+  gl.uniform2f(u_center, center[0], center[1]);
+  gl.uniform1f(u_scale, scale);
+  gl.uniform1f(u_time, timeAccum);
+  gl.uniform1i(u_palette, paletteMode);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+requestAnimationFrame(render);
+
+// --- Interaction ---------------------------------------------------------
+function screenToComplex(x, y) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const px = x * dpr;
+  const py = canvas.height - y * dpr;
+  const uv = [
+    (px - 0.5 * canvas.width) / canvas.height,
+    (py - 0.5 * canvas.height) / canvas.height
+  ];
+  return [center[0] + uv[0] * scale, center[1] + uv[1] * scale];
+}
+
+let dragging = false;
+let dragStart = null;
+let dragCenterStart = null;
+let movedDuringDrag = false;
+
+canvas.addEventListener('mousedown', (e) => {
+  dragging = true;
+  movedDuringDrag = false;
+  dragStart = [e.clientX, e.clientY];
+  dragCenterStart = [...center];
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!dragging) return;
+  const dx = e.clientX - dragStart[0];
+  const dy = e.clientY - dragStart[1];
+  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedDuringDrag = true;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  center[0] = dragCenterStart[0] - (dx * dpr / canvas.height) * scale;
+  center[1] = dragCenterStart[1] + (dy * dpr / canvas.height) * scale;
+});
+
+window.addEventListener('mouseup', (e) => {
+  if (!dragging) return;
+  dragging = false;
+  if (!movedDuringDrag) {
+    // click: recenter and restart zoom from here
+    const c = screenToComplex(e.clientX, e.clientY);
+    center = c;
+    scale = INITIAL_SCALE;
+    timeAccum = 0;
+    playing = true;
+    document.getElementById('btnPlay').classList.add('active');
+  }
+});
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const factor = Math.pow(0.999, e.deltaY);
+  const before = screenToComplex(e.clientX, e.clientY);
+  scale *= factor;
+  const after = screenToComplex(e.clientX, e.clientY);
+  center[0] += before[0] - after[0];
+  center[1] += before[1] - after[1];
+}, { passive: false });
+
+document.getElementById('btnPlay').addEventListener('click', () => {
+  playing = !playing;
+  document.getElementById('btnPlay').classList.toggle('active', playing);
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  center = [...INITIAL_CENTER];
+  scale = INITIAL_SCALE;
+  timeAccum = 0;
+  playing = true;
+  document.getElementById('btnPlay').classList.add('active');
+});
+
+document.getElementById('btnPalette').addEventListener('click', () => {
+  paletteMode = (paletteMode + 1) % 3;
+});
+
+const speedSlider = document.getElementById('speedSlider');
+const speedValue = document.getElementById('speedValue');
+speedSlider.addEventListener('input', () => {
+  zoomSpeed = Number(speedSlider.value) / 100; // 0 - 3.0x
+  speedValue.textContent = zoomSpeed.toFixed(1) + 'x';
+});
+
+const fpsSlider = document.getElementById('fpsSlider');
+const fpsValue = document.getElementById('fpsValue');
+fpsSlider.addEventListener('input', () => {
+  const fps = Number(fpsSlider.value);
+  minFrameInterval = 1000 / fps;
+  fpsValue.textContent = fps + 'fps';
+});
+</script>
+</body>
+</html>
